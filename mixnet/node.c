@@ -13,7 +13,6 @@
 #include "connection.h"
 #include "packet.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -23,6 +22,7 @@
  * the autograder parses console output.
  */
 #ifdef MIXNET_DEBUG
+#include <stdio.h>
 #define DBG(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define DBG(...) ((void) 0)
@@ -126,18 +126,6 @@ static uint64_t now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (((uint64_t) ts.tv_sec) * 1000u) +
            (((uint64_t) ts.tv_nsec) / 1000000u);
-}
-
-/**
- * Monotonic microseconds, for the lab's RTT measurement. The STP intervals
- * stay in milliseconds; on a LAN a round trip is a few hundred microseconds,
- * which millisecond resolution rounds away to 0 or 1.
- */
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (((uint64_t) ts.tv_sec) * 1000000u) +
-           (((uint64_t) ts.tv_nsec) / 1000u);
 }
 
 /** Reverse lookup: neighbor address -> port, or -1 if not a known neighbor. */
@@ -371,53 +359,92 @@ static void broadcast_on_tree(void *const handle,
 // Cost of a destination no path has reached yet
 #define INFINITE_COST UINT32_MAX
 
-/** Dijkstra's working state for one vertex; indexed by vertex id. */
+/**
+ * Dijkstra's working state for one vertex; indexed by vertex id.
+ *
+ * `path` is the whole route from us to this vertex: the hops after us, the
+ * vertex itself last. The equal-cost tie-break needs all of it rather than
+ * just the first hop, since two paths can leave through the same neighbor
+ * and only diverge further along. The rows live in the same allocation as
+ * the array, so freeing the array frees them too.
+ */
 struct sp_vertex {
     uint32_t cost;              // Cheapest known path from us; INFINITE_COST if none
-    int prev;                   // Vertex id before this one on that path; -1 for us
-    mixnet_address first_hop;   // Our neighbor that path leaves through
+    mixnet_address *path;       // [path_len]; empty for us, unreached, or both
+    uint16_t path_len;
     bool settled;               // Cost is final
 };
 
 /**
- * Whether path a beats path b: cheaper, or equal and leaving through a
- * smaller neighbor address. The second half is the handout's equal-cost
- * rule. It is also the order vertices are settled in, and that matters when
- * a link costs zero: a vertex must not be settled while an equal-cost path
- * with a smaller first hop could still reach it over a zero-cost link from
- * a vertex that is not settled yet.
+ * Whether path a beats path b: cheaper, or equal cost and holding the
+ * smaller address at the first hop where the two differ, compared from our
+ * end. That is the handout's equal-cost rule. A path that is a prefix of the
+ * other is the smaller one; between two paths to the *same* vertex that
+ * cannot happen, since both end at that vertex, but the settling order below
+ * compares paths to different vertices, where it can.
+ *
+ * It is also the order vertices are settled in, and that matters when a link
+ * costs zero: a vertex must not be settled while an equal-cost, smaller path
+ * could still reach it over a zero-cost link from a vertex that is not
+ * settled yet. Settling by (cost, path) rules that out, because any such path
+ * runs through an unsettled vertex that is itself smaller on both halves of
+ * the key -- its cost cannot be larger, and its path is a prefix.
  */
 static bool path_is_better(const uint32_t cost_a,
-                           const mixnet_address first_hop_a,
+                           const mixnet_address *const path_a,
+                           const uint16_t len_a,
                            const uint32_t cost_b,
-                           const mixnet_address first_hop_b) {
-    return (cost_a < cost_b) ||
-           ((cost_a == cost_b) && (first_hop_a < first_hop_b));
+                           const mixnet_address *const path_b,
+                           const uint16_t len_b) {
+
+    if (cost_a != cost_b) { return cost_a < cost_b; }
+
+    const uint16_t common = (len_a < len_b) ? len_a : len_b;
+    for (uint16_t i = 0; i < common; i++) {
+        if (path_a[i] != path_b[i]) { return path_a[i] < path_b[i]; }
+    }
+    return len_a < len_b;
 }
 
 /**
  * Dijkstra from `self` over the topology. Each vertex's advertised links are
  * its outgoing edges, so asymmetric costs need no special handling. Returns
  * the per-vertex result, owned by the caller, or NULL if out of memory.
+ *
+ * A single allocation holds the vertex array, one path row per vertex, and
+ * one scratch row for the candidate being relaxed. A row of g->count
+ * addresses is always enough: every path here is simple, since it is built
+ * from settled vertices only and never re-enters one.
  */
 static struct sp_vertex *run_dijkstra(const struct graph *g, const int self) {
-    struct sp_vertex *sp = malloc(sizeof(*sp) * g->count);
+    const size_t count = g->count;
+    if (count == 0) { return NULL; }
+
+    const size_t head = sizeof(struct sp_vertex) * count;
+    const size_t body = sizeof(mixnet_address) * count * (count + 1);
+
+    struct sp_vertex *sp = malloc(head + body);
     if (sp == NULL) { return NULL; }
 
+    // Rows follow the array; the last one is scratch, not owned by a vertex
+    mixnet_address *const rows = (mixnet_address *) ((char *) sp + head);
+    mixnet_address *const candidate = rows + (count * count);
+
     for (uint16_t i = 0; i < g->count; i++) {
-        sp[i] = (struct sp_vertex) { .cost = INFINITE_COST, .prev = -1,
-                                     .first_hop = INVALID_MIXADDR,
-                                     .settled = false };
+        sp[i] = (struct sp_vertex) { .cost = INFINITE_COST,
+                                     .path = rows + ((size_t) i * count),
+                                     .path_len = 0, .settled = false };
     }
-    sp[self].cost = 0;
+    sp[self].cost = 0;  // Reached by the empty path, which beats every other
 
     for (;;) {
         // Settle the best vertex that some path has reached
         int u = -1;
         for (uint16_t i = 0; i < g->count; i++) {
             if (sp[i].settled || (sp[i].cost == INFINITE_COST)) { continue; }
-            if ((u < 0) || path_is_better(sp[i].cost, sp[i].first_hop,
-                                          sp[u].cost, sp[u].first_hop)) {
+            if ((u < 0) ||
+                path_is_better(sp[i].cost, sp[i].path, sp[i].path_len,
+                               sp[u].cost, sp[u].path, sp[u].path_len)) {
                 u = (int) i;
             }
         }
@@ -433,14 +460,18 @@ static struct sp_vertex *run_dijkstra(const struct graph *g, const int self) {
             const int w = id_find(g, link->neighbor_mixaddr);
             if ((w < 0) || sp[w].settled) { continue; }
 
+            // The candidate is u's path with w appended, so relaxing from us
+            // yields the one-hop path {w} without a special case
             const uint32_t cost = sp[u].cost + link->cost;
-            const mixnet_address first_hop =
-                (u == self) ? link->neighbor_mixaddr : sp[u].first_hop;
+            const uint16_t len = (uint16_t) (sp[u].path_len + 1);
+            memcpy(candidate, sp[u].path, sizeof(*candidate) * sp[u].path_len);
+            candidate[len - 1] = link->neighbor_mixaddr;
 
-            if (path_is_better(cost, first_hop, sp[w].cost, sp[w].first_hop)) {
+            if (path_is_better(cost, candidate, len,
+                               sp[w].cost, sp[w].path, sp[w].path_len)) {
                 sp[w].cost = cost;
-                sp[w].prev = u;
-                sp[w].first_hop = first_hop;
+                sp[w].path_len = len;
+                memcpy(sp[w].path, candidate, sizeof(*candidate) * len);
             }
         }
     }
@@ -461,29 +492,23 @@ static bool fib_reset(struct node_state *s, const uint16_t count) {
 }
 
 /**
- * Turn Dijkstra's result for one destination into its FIB entry. The
- * predecessor chain runs from the destination back to us, so the route is
- * counted first, then filled from the back.
+ * Turn Dijkstra's result for one destination into its FIB entry: the
+ * destination's path without the destination itself, which the routing
+ * header carries separately.
  */
-static bool install_route(struct fib_entry *entry, const struct graph *g,
-                          const struct sp_vertex *sp, const int self,
-                          const int dst) {
+static bool install_route(struct fib_entry *entry,
+                          const struct sp_vertex *sp, const int dst) {
 
-    uint32_t hops = 0;
-    for (int v = sp[dst].prev; v != self; v = sp[v].prev) { hops++; }
+    const uint16_t hops = (uint16_t) (sp[dst].path_len - 1);  // Reachable: >= 1
     if (hops > MAX_MIXNET_ROUTE_LENGTH) { return false; }  // Header cannot carry it
 
     mixnet_address *route = NULL;
     if (hops > 0) {
         if ((route = malloc(sizeof(*route) * hops)) == NULL) { return false; }
-
-        uint32_t i = hops;
-        for (int v = sp[dst].prev; v != self; v = sp[v].prev) {
-            route[--i] = g->v[v].addr;
-        }
+        memcpy(route, sp[dst].path, sizeof(*route) * hops);
     }
     entry->reachable = true;
-    entry->route_len = (uint16_t) hops;
+    entry->route_len = hops;
     entry->route = route;
     return true;
 }
@@ -506,7 +531,7 @@ static void update_shortest_path(const struct mixnet_node_config *c,
 
     for (uint16_t id = 0; id < g->count; id++) {
         if (((int) id == self) || (sp[id].cost == INFINITE_COST)) { continue; }
-        if (!install_route(&s->fib[id], g, sp, self, (int) id)) {
+        if (!install_route(&s->fib[id], sp, (int) id)) {
             DBG("[%u] no FIB entry for %u\n",
                 (unsigned) c->node_addr, (unsigned) g->v[id].addr);
         }
@@ -941,14 +966,10 @@ static int path_between(const struct graph *g, const int from, const int to,
 
     int written = -1;
     if (sp[to].cost != INFINITE_COST) {
-        uint16_t hops = 0;
-        for (int v = sp[to].prev; v != from; v = sp[v].prev) { hops++; }
+        const uint16_t hops = (uint16_t) (sp[to].path_len - 1);  // Minus `to`
 
         if (hops <= capacity) {
-            uint16_t i = hops;
-            for (int v = sp[to].prev; v != from; v = sp[v].prev) {
-                out[--i] = g->v[v].addr;
-            }
+            if (hops > 0) { memcpy(out, sp[to].path, sizeof(*out) * hops); }
             written = (int) hops;
         }
     }
@@ -1098,7 +1119,7 @@ static void source_route(void *const handle,
         mixnet_packet_ping *ping = ping_fields(packet);
         ping->is_request = true;
         ping->_pad[0] = 0;
-        ping->send_time = now_us();
+        ping->send_time = now_ms();
     }
     send_to_next_hop(handle, c, s, packet);
 }
@@ -1162,20 +1183,9 @@ static void handle_routed(void *const handle,
 
     mixnet_packet_routing_header *rh = routing_header(packet);
     if (rh->dst_address == c->node_addr) {
-        if (packet->type == PACKET_TYPE_PING) {
-            mixnet_packet_ping *ping = ping_fields(packet);
-            if (ping->is_request) {
-                mixnet_packet *reply = make_ping_reply(packet);
-                if (reply != NULL) { send_to_next_hop(handle, c, s, reply); }
-            }
-            // A response addressed to us is one we originated, so send_time is
-            // our own clock's reading and the difference needs no clock sync
-            // between hosts (lab, Step 1: RTT).
-            else {
-                printf("RTT to %u: %llu us\n", (unsigned) rh->src_address,
-                       (unsigned long long) (now_us() - ping->send_time));
-                fflush(stdout);
-            }
+        if ((packet->type == PACKET_TYPE_PING) && ping_fields(packet)->is_request) {
+            mixnet_packet *reply = make_ping_reply(packet);
+            if (reply != NULL) { send_to_next_hop(handle, c, s, reply); }
         }
         send_packet(handle, user_port, packet);
         return;
