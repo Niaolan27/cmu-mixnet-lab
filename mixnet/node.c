@@ -13,6 +13,7 @@
 #include "connection.h"
 #include "packet.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -22,7 +23,6 @@
  * the autograder parses console output.
  */
 #ifdef MIXNET_DEBUG
-#include <stdio.h>
 #define DBG(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define DBG(...) ((void) 0)
@@ -126,6 +126,18 @@ static uint64_t now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (((uint64_t) ts.tv_sec) * 1000u) +
            (((uint64_t) ts.tv_nsec) / 1000000u);
+}
+
+/**
+ * Monotonic microseconds, for the lab's RTT measurement. The STP intervals
+ * stay in milliseconds; on a LAN a round trip is a few hundred microseconds,
+ * which millisecond resolution rounds away to 0 or 1.
+ */
+static uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (((uint64_t) ts.tv_sec) * 1000000u) +
+           (((uint64_t) ts.tv_nsec) / 1000u);
 }
 
 /** Reverse lookup: neighbor address -> port, or -1 if not a known neighbor. */
@@ -1086,7 +1098,7 @@ static void source_route(void *const handle,
         mixnet_packet_ping *ping = ping_fields(packet);
         ping->is_request = true;
         ping->_pad[0] = 0;
-        ping->send_time = now_ms();
+        ping->send_time = now_us();
     }
     send_to_next_hop(handle, c, s, packet);
 }
@@ -1150,9 +1162,20 @@ static void handle_routed(void *const handle,
 
     mixnet_packet_routing_header *rh = routing_header(packet);
     if (rh->dst_address == c->node_addr) {
-        if ((packet->type == PACKET_TYPE_PING) && ping_fields(packet)->is_request) {
-            mixnet_packet *reply = make_ping_reply(packet);
-            if (reply != NULL) { send_to_next_hop(handle, c, s, reply); }
+        if (packet->type == PACKET_TYPE_PING) {
+            mixnet_packet_ping *ping = ping_fields(packet);
+            if (ping->is_request) {
+                mixnet_packet *reply = make_ping_reply(packet);
+                if (reply != NULL) { send_to_next_hop(handle, c, s, reply); }
+            }
+            // A response addressed to us is one we originated, so send_time is
+            // our own clock's reading and the difference needs no clock sync
+            // between hosts (lab, Step 1: RTT).
+            else {
+                printf("RTT to %u: %llu us\n", (unsigned) rh->src_address,
+                       (unsigned long long) (now_us() - ping->send_time));
+                fflush(stdout);
+            }
         }
         send_packet(handle, user_port, packet);
         return;
