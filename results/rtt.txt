@@ -1,0 +1,4 @@
+[RTT] testcase_rtt_tree RTT to 6: 1193 us
+[RTT] testcase_rtt_ring RTT to 4: 1294 us
+[RTT] testcase_rtt_full_mesh RTT to 7: 444 us
+[RTT] testcase_rtt_line RTT to 7: 1456 us
