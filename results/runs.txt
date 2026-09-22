@@ -1,0 +1,4 @@
+[STP] testcase_stp_convergence_line converged=true stp_packets_until_convergence=62 inter_island_stp_packets=0 root_path_offset=0
+[STP] testcase_stp_convergence_tree converged=true stp_packets_until_convergence=31 inter_island_stp_packets=0 root_path_offset=0
+[STP] testcase_stp_convergence_ring converged=true stp_packets_until_convergence=46 inter_island_stp_packets=0 root_path_offset=0
+[STP] testcase_stp_convergence_full_mesh converged=true stp_packets_until_convergence=127 inter_island_stp_packets=0 root_path_offset=0

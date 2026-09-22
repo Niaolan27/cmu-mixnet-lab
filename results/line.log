@@ -1,0 +1,21 @@
+>> 8 node host(s); orchestrator co-located on ubuntu@ec2-100-58-106-8.compute-1.amazonaws.com
+>> SYNC=0: reusing the EXISTING remote build; mixnet/ and any local edits are NOT deployed
+>> orchestrator IP (as seen by nodes): 172.31.16.145
+>> [ubuntu@ec2-100-58-106-8.compute-1.amazonaws.com] starting orchestrator: testcase_stp_convergence_line
+[Testing] Starting testcase_stp_convergence_line...
+[Orchestrator] Started listening on port 9107
+>> node logs: /tmp/tmp.FywunKjZG9
+>> [ubuntu@ec2-100-58-106-8.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-52-91-170-163.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-32-199-168-18.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-54-221-45-78.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-98-81-157-241.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-54-90-190-90.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-107-20-131-82.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+>> [ubuntu@ec2-54-87-140-254.compute-1.amazonaws.com] starting node -> 172.31.16.145:9107
+[Orchestrator] Fragments returned OK
+[Orchestrator] Exiting normally
+[STP] testcase_stp_convergence_line converged=true stp_packets_until_convergence=62 inter_island_stp_packets=0 root_path_offset=0
+[Testing] PASS testcase_stp_convergence_line
+=============================================================
+[STP] testcase_stp_convergence_line converged=true stp_packets_until_convergence=62 inter_island_stp_packets=0 root_path_offset=0
