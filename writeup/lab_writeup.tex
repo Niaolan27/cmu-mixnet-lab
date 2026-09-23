@@ -1,0 +1,246 @@
+% 15-441/641 Project 1 Lab writeup.
+% Upload this file to an Overleaf project (or paste it into a blank one) and
+% compile with pdfLaTeX. It needs no packages beyond the Overleaf defaults.
+%
+% Status: Step 2 (optimization scenarios) is complete.
+%         Step 1 (measurement infrastructure) is marked TODO for the partner;
+%         the measured numbers from results/ are already filled in below.
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO: #1}}}
+
+\title{15-441/641 Project 1 Lab: STP Measurement and Optimization}
+\author{Matt Wei (mwei2) \and \todo{partner name (andrew id)}}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+
+\section{Step 1: Measurement Infrastructure}
+
+All Step 1 measurements were taken on an 8-node EC2 cluster in one region, with the orchestrator co-located on one of the hosts.
+The raw logs are in \texttt{results/}.
+
+\subsection{STP Convergence}
+
+\paragraph{Hypothesis.}
+\todo{Rank line, binary tree, ring and fully-connected in increasing order of STP messages to convergence, and explain the ordering.}
+
+\paragraph{Experiment.}
+Measured with the provided \texttt{testcase\_stp\_convergence\_*} test-cases via \texttt{impls/run\_ec2.sh}.
+The values below are from \texttt{results/runs.txt}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Topology & STP packets until convergence \\
+\midrule
+Line & 62 \\
+Binary tree & 31 \\
+Ring & 46 \\
+Fully connected & 127 \\
+\bottomrule
+\end{tabular}
+\caption{STP messages exchanged before convergence, one run per topology on EC2.}
+\end{table}
+
+\todo{Insert the bar plot (topology on the x-axis, STP messages on the y-axis).}
+% \begin{figure}[h]\centering\includegraphics[width=0.6\linewidth]{stp_convergence.png}\caption{...}\end{figure}
+
+\paragraph{Inference.}
+\todo{Does the data corroborate the hypothesis? Why or why not?}
+
+\subsection{Worst-case RTT}
+
+\paragraph{Hypothesis.}
+\todo{Rank the four topologies in increasing order of worst-case RTT (between the two furthest nodes) and explain the ordering.}
+
+\paragraph{Experiment.}
+Measured with our own PING implementation: the originating node prints \texttt{now - send\_time} when the response returns, in microseconds.
+The values below are from \texttt{results/rtt.txt}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Topology & Furthest pair & Worst-case RTT ($\mu$s) \\
+\midrule
+Line & 0 to 7 & 1456 \\
+Binary tree & 0 to 6 & 1193 \\
+Ring & 0 to 4 & 1294 \\
+Fully connected & 0 to 7 & 444 \\
+\bottomrule
+\end{tabular}
+\caption{Worst-case round-trip time per topology on EC2.}
+\end{table}
+
+\todo{Insert the bar plot (topology on the x-axis, worst-case RTT on the y-axis).}
+% \begin{figure}[h]\centering\includegraphics[width=0.6\linewidth]{rtt.png}\caption{...}\end{figure}
+
+\paragraph{Inference.}
+\todo{Does the data corroborate the hypothesis? Why or why not?}
+
+\section{Step 2: Optimization Scenarios}
+
+\subsection{Approach common to all three scenarios}
+
+Every STP packet a node sends is counted from startup until the first instant at which all nodes' latest advertisements are correct, so the count is driven by two things: how many packets each node sends before it is correct, and how much traffic the rest of the network generates while the slowest node catches up.
+Our baseline (the CP1/CP2 solution in \texttt{mixnet/}) does poorly on both.
+Every node claims to be the root on every port at startup, which alone is 24 packets on the hybrid topology, and then rebroadcasts on every improvement it hears, on every change of parent, and on every hello relayed from its parent.
+
+All three optimized implementations share one \texttt{node.c}; the folders differ only in a small \texttt{tuning.h}.
+The FLOOD, LSA, routing and mixing code is the baseline's, unchanged.
+Only the spanning-tree emission policy was rewritten, around five rules:
+
+\begin{enumerate}
+\item \textbf{Silence until there is something to say.}
+A node claims to be the root only after an election delay proportional to its address, and only if it has not heard of a better root by then.
+The lowest address has the shortest delay, so it speaks first and its wave reaches every other node before their own timers expire.
+No other node ever claims the root.
+If a timer does expire early (clock skew, loss), the node claims the root, its neighbors correct it, and a few packets are wasted rather than correctness.
+
+\item \textbf{Advertise once per change, after a hold-down.}
+A node advertises on every port when its (root, distance) pair changes, but only after a 2\,ms hold-down.
+Packets already in flight to it are folded into one decision, so a node whose first news of the root came the long way round does not advertise a distance it is about to correct.
+Parent choice, including the handout's lowest-address tie-break, is purely local and never triggers a packet.
+
+\item \textbf{Repeat only where it is useful.}
+After its advertisement, a node repeats its state only on ports whose neighbor has not been heard from, believes in a worse root, or advertises a distance our state would improve.
+Ports toward children get a periodic keepalive, which is the root hello at the root and its relay elsewhere.
+Ports toward the parent or a sibling get nothing further.
+
+\item \textbf{Answer a neighbor that keeps repeating.}
+Fast repeats only ever go to a port whose neighbor has not been heard, so a neighbor repeating at the fast rate is one that has not heard us.
+We echo our state to it.
+This closes the loop over lossy links without an acknowledgement field, which the 6-byte STP payload has no room for.
+
+\item \textbf{Long links get fewer keepalives.}
+The first reply on a port measures the link's round trip.
+A port whose round trip exceeds a threshold is treated as a long-distance link and kept alive at a slower cadence.
+\end{enumerate}
+
+The tree remains a correct spanning tree: each implementation was staged as \texttt{mixnet/node.c} and passes all CP1 and CP2 test-cases, including link-failure reconvergence and the tie-break cases.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Parameter & \texttt{noloss} & \texttt{lossy} & \texttt{islands} \\
+\midrule
+Election delay per address rank & 30\,ms & 30\,ms & 40\,ms \\
+Hold-down before advertising & 2\,ms & 2\,ms & 2\,ms \\
+Fast repeat interval & 10\,ms & 4\,ms & 200\,ms \\
+Repeats before exponential backoff & 6 & 6 & 6 \\
+Long-link threshold (first-reply RTT) & 20\,ms & 20\,ms & 20\,ms \\
+Keepalive interval on long links & 50\,ms & 50\,ms & 50\,ms \\
+\bottomrule
+\end{tabular}
+\caption{Per-scenario tuning (\texttt{impls/*/tuning.h}). Everything else is identical.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llrrr}
+\toprule
+Scenario & Metric & Baseline & Optimized & Full-credit threshold \\
+\midrule
+1: hybrid, no loss & total STP packets & 99.7 & 8.0 & $\le 65$ \\
+2: hybrid, 50\% loss & total STP packets & 118.8 & 58.3 & $\le 100$ \\
+EC: islands & inter-island STP packets & 24.7 & 4.0 & $\le 15$ \\
+EC: islands & total STP packets & 135.9 & 34.0 & (not scored) \\
+\bottomrule
+\end{tabular}
+\caption{Mean over 10 local runs of \texttt{impls/run\_impl.sh <scenario> 10}, baseline (\texttt{mixnet/}) versus \texttt{--impl impls/<scenario>}. Every run of every scenario converged.}
+\end{table}
+
+\subsection{Scenario 1: Hybrid topology, no loss}
+
+\paragraph{What changed.}
+Three changes account for the drop from 99.7 to 8.0 packets.
+
+First, the election delay removes the startup burst entirely.
+In the baseline all 8 nodes announce themselves as root on all 12 links (24 packets) and then chase each other's claims; in ours only node 0 ever announces, and it does so once per port.
+
+Second, the hold-down makes every node's first advertisement its last.
+On the hybrid topology node 4, for example, can hear about the root from node 3 (distance 1) and from node 2 (distance 2) within a few hundred microseconds of each other; without the hold-down, whichever arrives first sets a distance that may then need a second advertisement to correct.
+With it, the wave propagates in lockstep, one hop per hold-down, and each node computes its final distance before it speaks.
+On the wire each node sends exactly one packet per port, 24 in total, none of them corrections.
+
+Third, nothing else is sent before convergence.
+The baseline rebroadcasts on every parent hello (14 packets per 20\,ms hello interval on this topology) and on every change of parent, including tie-break changes that do not alter root or distance.
+Ours sends keepalives only to children, only from 20\,ms after the node's own advertisement, and the whole wave completes in about 8\,ms, so convergence is reached before the first keepalive is due.
+
+The reported mean of 8.0 rather than 24 reflects how the framework observes convergence: the orchestrator's pcap thread reads one mirrored packet per node per poll round, and because every node's first packet already reports the correct root and distance, the all-correct condition is satisfied after the first packet from each of the 8 nodes.
+
+\paragraph{How the no-loss, no-failure assumption helped.}
+Without loss, a single advertisement per port is guaranteed to arrive, so no retransmission is needed before convergence.
+The fast-repeat interval was raised to 10\,ms so it acts only as insurance; in the measured runs it never fires.
+Without failures, it is safe for a node to stay silent through its election delay and its hold-down, since nothing it is waiting for can fail to come.
+The reelection machinery (200\,ms without a closer same-root neighbor) is kept for correctness but never triggers.
+And because the tree is established by the first wave, hello relays serve only liveness, so deferring them until after a node has advertised costs nothing.
+
+\subsection{Scenario 2: Lossy satellite links}
+
+\paragraph{What changed.}
+The common design from Scenario 1 is kept, and four mechanisms carry it across links that drop half of all packets.
+
+First, fast targeted repeats.
+A node repeats its state every 4\,ms, but only on ports whose neighbor has not been heard from or is advertising something our state would improve.
+With 50\% loss each link direction needs two sends on average to get one packet through, so the floor for the 12 links is about 48 sends; targeting the repeats at exactly the ports that still need them keeps the count close to that.
+After six unanswered repeats the interval doubles, so a link that is genuinely dead costs a bounded trickle rather than a steady stream.
+
+Second, the echo rule.
+When our single advertisement to a neighbor is lost, the neighbor keeps repeating to us at the fast rate because it has not heard us, while from our side the port looks settled.
+Recognizing a fast-rate arrival as a request, and answering it, is what lets both ends of every link learn each other without any acknowledgement field.
+
+Third, liveness that tolerates loss.
+The reelection timer is refreshed by a packet from any same-root neighbor closer to the root than we are, not only from the designated parent, and keepalives toward children are timed by each node itself rather than triggered by the arrival of its parent's hello.
+In the baseline a hello has to survive every hop from the root to refresh a deep node, so under 50\% loss a node three hops down sees a hello with probability $1/8$ per interval and reelects spuriously; ours makes each link's loss independent of the others.
+
+Fourth, the hold-down still folds in packets that arrive together, and the election delay (30\,ms per address rank) is long enough that the probability of a node timing out before the root's repeated advertisements reach it is negligible.
+
+\paragraph{Result and what could not be assumed.}
+The mean over 10 runs is 58.3, against 118.8 for the baseline and a 100-packet threshold, with every run converging.
+Per-run counts range from 8, when every first transmission happens to get through, to 98, when the chain of successful transmissions to the deepest node (node 5, three hops from the root) takes several rounds.
+Unlike Scenario 1 we cannot assume a packet arrives, so repeats are the mechanism rather than insurance, and they must be fast: any interval longer than a neighbor's hold-down plus a round trip only delays convergence while keepalives elsewhere keep accumulating.
+What the scenario does still guarantee is that no link or node fails permanently, so a repeat always succeeds eventually and reelection is never needed during convergence; the 200\,ms reelection interval is never reached with repeats 4\,ms apart.
+
+\subsection{EC Scenario: ALOHA-ANDREWNET (islands)}
+
+\paragraph{How the algorithm differs from baseline STP.}
+The baseline treats every port alike: it announces its root claim on all ports at startup, rebroadcasts on every improvement, and relays every hello on every non-parent port.
+On the islands topology that puts 24.7 packets across the two long links before convergence, out of 135.9 in total.
+Ours differs in three ways that matter for the long links, on top of the common design.
+
+First, the election delay is sized for the long links.
+The root's wave has to cross two 50\,ms links to reach the far island, so it arrives at node 5 about 104\,ms after node 0 speaks.
+With 40\,ms per address rank, node 5 is still waiting (its timer is at 200\,ms) when the wave arrives, so no node on either far island ever claims the root, and no wrong claim is ever carried across a long link.
+
+Second, no repeat crosses a long link before its reply can return.
+A reply over an inter-island link takes a full 100\,ms round trip; a 4\,ms repeat interval would put 25 useless packets on the link before the first reply.
+The repeat interval is set to 200\,ms, which is safe because these links do not lose packets, so repeats are insurance only.
+
+Third, long links are detected and kept alive slowly.
+Each node measures the time between its first send on a port and the first reply, which is about 2\,ms (one hold-down) on an intra-island link and about 102\,ms on an inter-island one.
+Anything above 20\,ms is classified as a long link, and keepalives on it go out every 50\,ms instead of every 20\,ms hello interval.
+The classification is made from measured timing alone, as the handout intends; nothing about the topology is assumed.
+
+\paragraph{What this does to the inter-island load.}
+Before convergence exactly four packets cross the long links in every run: node 1's advertisement to node 4, node 4's advertisement back to node 1 and onward to node 5, and node 5's advertisement back to node 4.
+That is the minimum for this topology, because node 4 can only learn the root from node 1, node 5 only from node 4, and each child has to tell its parent once so that the parent unblocks the port.
+No hello, relay, repeat or wrong root claim crosses a long link before convergence.
+
+\paragraph{Baseline versus optimized.}
+Both metrics improve.
+Inter-island STP packets drop from 24.7 to 4.0, against a threshold of 15, and total STP packets drop from 135.9 to 34.0.
+The total improves for the same reasons as in Scenario 1: one advertisement per port, no startup burst, no relayed hellos before convergence.
+The inter-island count improves further because the timing-sized election delay and the slow repeat interval keep every non-essential packet off the long links.
+
+\end{document}
