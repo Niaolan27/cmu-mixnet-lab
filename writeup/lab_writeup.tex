@@ -16,7 +16,7 @@
 \newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO: #1}}}
 
 \title{15-441/641 Project 1 Lab: STP Measurement and Optimization}
-\author{Matt Wei (mwei2) \and \todo{partner name (andrew id)}}
+\author{Matt Wei (mwei2) \and Jason Niow(jniow)}
 \date{September 2026}
 
 \begin{document}
@@ -30,8 +30,12 @@ The raw logs are in \texttt{results/}.
 \subsection{STP Convergence}
 
 \paragraph{Hypothesis.}
-\todo{Rank line, binary tree, ring and fully-connected in increasing order of STP messages to convergence, and explain the ordering.}
-
+In increasing order: Binary tree, Line, Ring, Fully Connected. I think that binary tree would exchange the least STP control messages
+ because it already has a tree-like structure. So it should take the least number of rounds to converge, and therefore the fewest control messages exchanged. 
+ Then, I think that a line is next because it does not have any cycles as compared to a ring. I think that with a cycle, there will be more messages broadcasted
+ since every node is connected to two other nodes. Whereas in a line, the ends are only connected to one node. I think fully connected 
+ will exchange the most STP control messages because initially, every node will broadcast to every other node. That alone is a lot of messages.
+ In addition, every subsequent message will be broadcasted to every other node. So there will be a lot of messages exchanged.
 \paragraph{Experiment.}
 Measured with the provided \texttt{testcase\_stp\_convergence\_*} test-cases via \texttt{impls/run\_ec2.sh}.
 The values below are from \texttt{results/runs.txt}.
@@ -51,16 +55,28 @@ Fully connected & 127 \\
 \caption{STP messages exchanged before convergence, one run per topology on EC2.}
 \end{table}
 
-\todo{Insert the bar plot (topology on the x-axis, STP messages on the y-axis).}
-% \begin{figure}[h]\centering\includegraphics[width=0.6\linewidth]{stp_convergence.png}\caption{...}\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\linewidth]{../results/stp_convergence.png}
+    \caption{...}
+\end{figure}
 
+\newpage
 \paragraph{Inference.}
-\todo{Does the data corroborate the hypothesis? Why or why not?}
-
+The data matches for tree and full mesh. But line and ring are flipped. 
+I think my analysis for tree and full mesh were correct. 
+But between line and ring, I forgot to account for the fact that it takes more hops 
+for a packet to travel from one end of the line to the other end of the line.
+Whereas in a ring, it is half the distance. Therefore, since it takes more rounds of broadcasting 
+for the line to converge, it ends up exchanging more messages than the ring.
 \subsection{Worst-case RTT}
 
 \paragraph{Hypothesis.}
-\todo{Rank the four topologies in increasing order of worst-case RTT (between the two furthest nodes) and explain the ordering.}
+I think that RTT goes in increasing order of fully connected, Tree, Ring, Line.
+Fully connected has the shortest RTT because every node is directly connected to all other nodes. So it only takes one hop to go from sender to receiver, and one hop back. 
+Tree is next because a tree just has to traverse 2 times of the depth of the tree, going from the leaf node to the root, and then back down to the other leaf node.
+Next is Ring because the worst case is that two nodes are on opposite ends of the ring. This means RTT is the time to travel one round around the ring. 
+Lastly, Line is the longest because you need to traverse the entirety of the line twice for RTT. 
 
 \paragraph{Experiment.}
 Measured with our own PING implementation: the originating node prints \texttt{now - send\_time} when the response returns, in microseconds.
@@ -81,12 +97,21 @@ Fully connected & 0 to 7 & 444 \\
 \caption{Worst-case round-trip time per topology on EC2.}
 \end{table}
 
-\todo{Insert the bar plot (topology on the x-axis, worst-case RTT on the y-axis).}
-% \begin{figure}[h]\centering\includegraphics[width=0.6\linewidth]{rtt.png}\caption{...}\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\linewidth]{../results/rtt.png}
+    \caption{...}
+\end{figure}
 
 \paragraph{Inference.}
-\todo{Does the data corroborate the hypothesis? Why or why not?}
-
+The results corroborate the hypothesis. Fully connected has the shortest RTT by far
+because it is directly connected to all other nodes. The tree has the next shortest RTT.
+However, as opposed to my analysis previously, the tree has more hops in the test. So 
+my previous analysis was not exactly correct. However, even though it has more hops, since we 
+are measuring RTT using AWS servers, there is some variability in terms of the latency per hop. The EC2
+link latency between any two nodes differs. So, hop count alone does not predict the RTT. Therefore, 
+it turned out that for the tree, the hops were more but shorter. That resulted in the tree having a shorter 
+RTT than the ring. Lastly, the line is indeed the longest RTT probably because it needed the most hops by far. 
 \section{Step 2: Optimization Scenarios}
 
 \subsection{Approach common to all three scenarios}
